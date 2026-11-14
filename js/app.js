@@ -66,7 +66,7 @@ const clientName = id => (db.clients.find(c => c.id == id) || {}).nome || "—";
 const teamName = id => (db.teams.find(t => t.id == id) || {}).nome || "—";
 
 /* ---------- Entidades (CRUD genérico) ---------- */
-const tagClass = s => ({ "Concluído": "ok", "Realizado": "ok", "Receita": "ok", "Em Andamento": "run", "Agendado": "run", "Pendente": "wait", "Pago": "ok", "Recusado": "bad", "Cancelado": "bad", "Despesa": "bad" }[s] || "");
+const tagClass = s => ({ "Concluído": "ok", "Realizado": "ok", "Receita": "ok", "Em Andamento": "run", "Agendado": "run", "Pendente": "wait", "Pago": "ok", "Confirmado": "ok", "Recusado": "bad", "Cancelado": "bad", "Despesa": "bad" }[s] || "");
 const tag = s => `<span class="tag ${tagClass(s)}">${esc(s)}</span>`;
 const payTag = o => {
   if (o.pago) return tag("Pago");
@@ -79,7 +79,7 @@ const teamOpts = () => db.teams.map(t => [t.id, t.nome]);
 
 const ENTITIES = {
   agendamentos: { store: "appointments", title: "Agendamentos", sub: "Agenda de serviços", novo: "Novo agendamento",
-    fields: [{ k: "cliente", l: "Cliente", t: "select", o: clientOpts, num: 1 }, { k: "servico", l: "Serviço" }, { k: "data", l: "Data", t: "date" }, { k: "equipe", l: "Equipe", t: "select", o: teamOpts, num: 1 }, { k: "status", l: "Status", t: "select", o: () => ["Agendado", "Realizado", "Cancelado"].map(s => [s, s]) }],
+    fields: [{ k: "cliente", l: "Cliente", t: "select", o: clientOpts, num: 1 }, { k: "servico", l: "Serviço" }, { k: "data", l: "Data", t: "date" }, { k: "equipe", l: "Equipe", t: "select", o: teamOpts, num: 1 }, { k: "status", l: "Status", t: "select", o: () => ["Agendado", "Confirmado", "Realizado", "Cancelado"].map(s => [s, s]) }],
     cols: [["Data", r => fmtDate(r.data)], ["Cliente", r => esc(clientName(r.cliente))], ["Serviço", r => esc(r.servico)], ["Equipe", r => esc(teamName(r.equipe))], ["Status", r => tag(r.status)]], sort: r => r.data, desc: true },
   ordens: { store: "orders", title: "Ordens de Serviço", sub: "Acompanhe cada serviço e orçamento", novo: "Nova ordem",
     fields: [{ k: "cliente", l: "Cliente", t: "select", o: clientOpts, num: 1 }, { k: "descricao", l: "Descrição" }, { k: "valor", l: "Valor (R$)", t: "number" }, { k: "data", l: "Data", t: "date" }, { k: "vencimento", l: "Vencimento", t: "date" }, { k: "status", l: "Status", t: "select", o: () => ["Pendente", "Em Andamento", "Concluído", "Recusado"].map(s => [s, s]) }, { k: "pago", l: "Pagamento", t: "select", bool: 1, o: () => [["false", "Em aberto"], ["true", "Pago"]] }],
@@ -254,10 +254,54 @@ function suggestions() {
   });
   return out.filter(x => phoneOf(db.clients.find(c => c.id == x.cliente)));
 }
-function logSend(cliente, tipo, ref, txt) {
-  db.messages.push({ id: nextId(), cliente: +cliente, tipo, ref, txt, em: new Date().toISOString() });
-  save();
-  window.open(waLink(db.clients.find(c => c.id == cliente), txt), "_blank", "noopener");
+const TOKEN_KEY = "gestaolucros.token";
+const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; } };
+const hasServer = location.protocol.startsWith("http");
+const wa = { configured: false, state: "", error: "", at: 0 };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function apiCall(path, opt = {}) {
+  const r = await fetch(path, { ...opt, headers: { "Content-Type": "application/json", "x-app-token": getToken() } });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || "Erro " + r.status);
+  return j;
+}
+async function refreshStatus() {
+  if (!hasServer) return;
+  wa.at = Date.now();
+  try { const st = await apiCall("/api/status"); wa.configured = st.configured; wa.state = st.state || ""; wa.error = ""; }
+  catch (e) { wa.configured = false; wa.state = ""; wa.error = e.message; }
+}
+const waReady = () => wa.configured && wa.state === "open";
+// Envia pela Evolution API (se conectada) ou abre o wa.me (modo manual). Retorna true se enviou/abriu.
+async function logSend(cliente, tipo, ref, txt) {
+  const c = db.clients.find(x => x.id == cliente);
+  const entry = { id: nextId(), cliente: +cliente, tipo, ref, txt, em: new Date().toISOString(), dir: "out" };
+  if (!waReady()) { window.open(waLink(c, txt), "_blank", "noopener"); db.messages.push(entry); save(); return true; }
+  try {
+    await apiCall("/api/send", { method: "POST", body: JSON.stringify({ number: phoneOf(c), text: txt }) });
+    entry.via = "api"; db.messages.push(entry); save(); return true;
+  } catch (e) { alert("Não foi possível enviar para " + (c ? c.nome : "cliente") + ": " + e.message); return false; }
+}
+// Respostas recebidas pelo webhook da Evolution
+async function pollInbox() {
+  if (!waReady()) return;
+  try {
+    const { messages } = await apiCall("/api/inbox?since=" + (db.inboxSeq || 0));
+    if (!messages.length) return;
+    messages.forEach(m => {
+      db.inboxSeq = Math.max(db.inboxSeq || 0, m.seq);
+      const tail = m.phone.slice(-9), c = db.clients.find(x => String(x.telefone).replace(/\D/g, "").slice(-9) === tail);
+      if (!c || db.messages.some(x => x.ref === "I" + m.id)) return;
+      const msg = { id: nextId(), cliente: c.id, tipo: "resposta", ref: "I" + m.id, txt: m.text, em: m.at, dir: "in" };
+      if (/\b(confirm\w*|ok|sim)\b/i.test(m.text)) {
+        const ap = db.appointments.filter(a => a.cliente == c.id && a.status === "Agendado" && a.data >= today()).sort((x, y) => x.data > y.data ? 1 : -1)[0];
+        if (ap) { ap.status = "Confirmado"; msg.auto = "Agendamento de " + fmtDate(ap.data) + " confirmado"; }
+      }
+      db.messages.push(msg);
+    });
+    save();
+    if (!($("#msg") || {}).value) render(); else { const n = $(".badge"); if (n) n.remove(); }
+  } catch { /* tenta de novo no próximo ciclo */ }
 }
 let chatClient = null, showAll = false;
 function whatsapp() {
@@ -270,14 +314,21 @@ function whatsapp() {
   }).join("");
   const cl = db.clients.find(c => c.id == chatClient) || {};
   const thread = db.messages.filter(m => m.cliente == chatClient).sort((a, b) => a.em > b.em ? 1 : -1)
-    .map(m => `<div class="bubble"><small>${esc(TIPOS[m.tipo] || m.tipo)}</small>${esc(m.txt)}<time>${new Date(m.em).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })} ✓</time></div>`).join("") || `<p class="empty">Nenhuma mensagem enviada a este cliente ainda.</p>`;
+    .map(m => `<div class="bubble ${m.dir === "in" ? "in" : ""}"><small>${m.dir === "in" ? "Resposta do cliente" : esc(TIPOS[m.tipo] || m.tipo)}${m.via ? " · API" : ""}</small>${esc(m.txt)}${m.auto ? `<small class="auto">✔ ${esc(m.auto)}</small>` : ""}<time>${new Date(m.em).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })}${m.dir === "in" ? "" : " ✓"}</time></div>`).join("") || `<p class="empty">Nenhuma mensagem enviada a este cliente ainda.</p>`;
   const quick = ["lembrete", "cobrancaAviso", "cobrancaVencida", "agradecimento"].map(k => `<button type="button" class="chip" data-tpl="${k}">${TIPOS[k]}</button>`).join("");
   const shown = showAll ? sug : sug.slice(0, 6);
   const queue = sug.length ? shown.map((x, i) => `<div class="sug"><div><span class="tag ${x.tipo === "cobrancaVencida" ? "bad" : x.tipo === "lembrete" ? "run" : "wait"}">${TIPOS[x.tipo]}</span> <b>${esc(clientName(x.cliente))}</b><p>${esc(x.txt)}</p></div><button class="btn" data-send="${i}">Enviar</button></div>`).join("") + (sug.length > 6 ? `<p style="margin-top:10px"><button class="btn ghost" id="more">${showAll ? "Mostrar menos" : `Ver todas (${sug.length})`}</button></p>` : "") : `<p class="empty">Nada pendente. 🎉 Nenhum lembrete ou cobrança a enviar pelas regras atuais.</p>`;
   window.__sug = sug;
+  const stateTxt = !hasServer ? `Modo manual: o botão abre o WhatsApp Web/app com a mensagem pronta. Para envio e respostas automáticas, rode <code>npm start</code> e configure a Evolution API (veja o README).`
+    : wa.error ? `⚠️ ${esc(wa.error)}` : !wa.configured ? `Servidor ativo, mas a Evolution API não está configurada (.env). Usando modo manual.`
+    : waReady() ? `<span class="tag ok">Conectado</span> Evolution API — envio e recebimento automáticos.` : `<span class="tag wait">${esc(wa.state || "desconectado")}</span> Escaneie o QR Code para conectar o número.`;
+  const apiBtns = hasServer ? `<div class="chips"><input id="tok" type="password" placeholder="Token de acesso (APP_TOKEN)" value="${esc(getToken())}" style="max-width:240px">
+    ${wa.configured ? `<button class="chip" id="qr">Conectar (QR Code)</button><button class="chip" id="hook">Configurar webhook</button>` : ""}<button class="chip" id="recheck">Verificar conexão</button></div>` : "";
+  const bulk = waReady() && sug.length > 1 ? `<button class="btn ghost" id="bulk">Enviar todas (${sug.length}) com intervalo</button>` : "";
   return `<header class="top"><div><h1>WhatsApp</h1><p>Lembretes e cobranças com um clique</p></div><a class="btn ghost" href="#configuracoes" style="text-decoration:none">Editar regras</a></header>
-  <div class="card"><h3>Fila das regras <span class="tag wait">${sug.length} pendente(s)</span></h3>${queue}
-    <p class="hint">O botão abre o WhatsApp com a mensagem pronta; você confirma o envio lá. Respostas dos clientes aparecem no próprio WhatsApp.</p></div>
+  <div class="card" style="margin-bottom:16px"><h3>Conexão</h3><p style="font-size:13px">${stateTxt}</p>${apiBtns}</div>
+  <div class="card"><h3>Fila das regras ${bulk} <span class="tag wait">${sug.length} pendente(s)</span></h3>${queue}
+    <p class="hint">${waReady() ? "Envio direto pela Evolution API. O envio em lote usa intervalo aleatório de 4–9 s para reduzir risco de bloqueio." : "Modo manual: o botão abre o WhatsApp com a mensagem pronta; você confirma o envio lá."}</p></div>
   <div class="card chat" style="margin-top:16px"><aside>${list}</aside>
     <section><div class="chat-head"><b>${esc(cl.nome || "")}</b><small>${esc(cl.telefone || "sem telefone")}</small></div>
       <div class="thread">${thread}</div>
@@ -328,13 +379,40 @@ function bind(route) {
   if (route === "whatsapp") {
     const more = $("#more"); if (more) more.onclick = () => { showAll = !showAll; render(); };
     app.querySelectorAll("[data-chat]").forEach(b => b.onclick = () => { chatClient = +b.dataset.chat; render(); });
-    app.querySelectorAll("[data-send]").forEach(b => b.onclick = () => { const x = window.__sug[+b.dataset.send]; logSend(x.cliente, x.tipo, x.ref, x.txt); render(); });
+    app.querySelectorAll("[data-send]").forEach(b => b.onclick = async () => { b.disabled = true; const x = window.__sug[+b.dataset.send]; await logSend(x.cliente, x.tipo, x.ref, x.txt); render(); });
+    const q = id => $(id);
+    if (q("#tok")) q("#tok").onchange = e => { try { localStorage.setItem(TOKEN_KEY, e.target.value.trim()); } catch { /* ignore */ } refreshStatus().then(render); };
+    if (q("#recheck")) q("#recheck").onclick = () => refreshStatus().then(render);
+    if (q("#qr")) q("#qr").onclick = async () => {
+      try {
+        const j = await apiCall("/api/qrcode"), img = String(j.base64 || "");
+        $("#modalForm").innerHTML = `<h2>Conectar WhatsApp</h2>${img.startsWith("data:image/") ? `<img src="${esc(img)}" alt="QR Code" style="width:100%;max-width:300px;margin:auto">` : "<p>QR Code indisponível (a instância pode já estar conectada).</p>"}
+          ${j.pairingCode ? `<p>Código de pareamento: <b>${esc(j.pairingCode)}</b></p>` : ""}<p class="hint">WhatsApp → Aparelhos conectados → Conectar um aparelho.</p><div class="actions"><button type="button" class="btn" id="cancel">Fechar</button></div>`;
+        $("#modal").hidden = false; $("#cancel").onclick = () => { $("#modal").hidden = true; refreshStatus().then(render); };
+      } catch (e) { alert(e.message); }
+    };
+    if (q("#hook")) q("#hook").onclick = async () => {
+      const pub = prompt("Endereço público deste servidor (a Evolution precisa alcançá-lo):", location.origin); if (!pub) return;
+      try { await apiCall("/api/webhook/setup", { method: "POST", body: JSON.stringify({ publicUrl: pub }) }); alert("Webhook configurado."); } catch (e) { alert(e.message); }
+    };
+    if (q("#bulk")) q("#bulk").onclick = async () => {
+      const list = [...window.__sug]; if (!confirm(`Enviar ${list.length} mensagens com intervalo entre elas?`)) return;
+      const btn = q("#bulk"); btn.disabled = true;
+      for (let i = 0; i < list.length; i++) {
+        btn.textContent = `Enviando ${i + 1}/${list.length}…`;
+        if (!(await logSend(list[i].cliente, list[i].tipo, list[i].ref, list[i].txt))) break;
+        if (i < list.length - 1) await sleep(4000 + Math.random() * 5000);
+      }
+      render();
+    };
+    const th = $(".thread"); if (th) th.scrollTop = th.scrollHeight;
+    if (hasServer && Date.now() - wa.at > 15000) refreshStatus().then(() => { if (location.hash === "#whatsapp" && !($("#msg") || {}).value) render(); });
     app.querySelectorAll("[data-tpl]").forEach(b => b.onclick = () => { $("#msg").value = whatsappVarsFor(b.dataset.tpl); $("#msg").focus(); });
-    $("#composer").onsubmit = ev => { ev.preventDefault(); const t = $("#msg").value.trim(); if (t) { logSend(chatClient, "manual", "M", t); render(); } };
+    $("#composer").onsubmit = async ev => { ev.preventDefault(); const t = $("#msg").value.trim(); if (t && (await logSend(chatClient, "manual", "M", t))) render(); };
   }
   if (route === "ordens") app.querySelectorAll("[data-pay]").forEach(b => b.onclick = () => {
     const o = db.orders.find(x => x.id === +b.dataset.pay); o.pago = true; settle(o); save(); render();
-    if (confirm("Pagamento registrado! Enviar agradecimento por WhatsApp?")) logSend(o.cliente, "agradecimento", "O" + o.id, fill(db.settings.templates.agradecimento, orderVars(o)));
+    if (confirm("Pagamento registrado! Enviar agradecimento por WhatsApp?")) logSend(o.cliente, "agradecimento", "O" + o.id, fill(db.settings.templates.agradecimento, orderVars(o))).then(render);
   });
   if (route === "configuracoes") {
     $("#cfg").onsubmit = ev => {
@@ -379,3 +457,4 @@ $("#menuBtn").onclick = () => $("#sidebar").classList.toggle("open");
 load();
 window.addEventListener("hashchange", render);
 render();
+if (hasServer) { refreshStatus().then(() => { pollInbox(); render(); }); setInterval(async () => { if (Date.now() - wa.at > 60000) await refreshStatus(); pollInbox(); }, 8000); }
