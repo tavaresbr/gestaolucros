@@ -26,3 +26,6 @@ Marca: Azul `#2563EB`, Verde `#10B981`, Azul escuro `#0B1F44`, Cinza claro `#F8F
 Endpoints usados na Evolution (v2): `GET /instance/connectionState/{i}`, `GET /instance/connect/{i}`, `POST /message/sendText/{i}`, `POST /webhook/set/{i}` (evento `MESSAGES_UPSERT`).
 
 Segurança: defina `APP_TOKEN` antes de expor na internet (sem ele, qualquer pessoa com acesso ao endereço poderia enviar mensagens pelo seu número) e use HTTPS. Os dados de clientes e agendamentos continuam no navegador; o servidor guarda apenas a caixa de entrada (`data/inbox.json`).
+
+## Roadmap SaaS
+Veja [docs/PLANO-SAAS.md](docs/PLANO-SAAS.md): arquitetura multiempresa, planos, fases e riscos.
