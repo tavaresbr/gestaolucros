@@ -10,6 +10,20 @@ const daysAgo = n => { const d = new Date(); d.setDate(d.getDate() - n); return 
 
 /* ---------- Armazenamento ---------- */
 const KEY = "gestaolucros.v1";
+const addDays = (d, n) => { const x = new Date(d + "T12:00:00"); x.setDate(x.getDate() + n); return iso(x); };
+const today = () => iso(new Date());
+const diffDays = (a, b) => Math.round((new Date(a + "T12:00:00") - new Date(b + "T12:00:00")) / 864e5);
+function defaultSettings() {
+  return {
+    empresa: "Gestão Lucros", pix: "", lembreteDias: 1, cobrancaAntes: 2, cobrancaApos: 1, reenvioDias: 7,
+    templates: {
+      lembrete: "Olá, {cliente}! 👋 Lembrando do seu agendamento de {servico} em {data}. Responda *CONFIRMO* ou nos avise se precisar remarcar. — {empresa}",
+      cobrancaAviso: "Olá, {cliente}! Passando para lembrar que a OS #{os} ({servico}) no valor de {valor} vence em {vencimento}. {pix}Qualquer dúvida, é só chamar. — {empresa}",
+      cobrancaVencida: "Olá, {cliente}. Identificamos que a OS #{os} ({servico}), de {valor}, venceu em {vencimento} e consta em aberto. {pix}Se já pagou, desconsidere e nos envie o comprovante. — {empresa}",
+      agradecimento: "Olá, {cliente}! Recebemos seu pagamento da OS #{os}. Obrigado pela confiança! — {empresa}"
+    }
+  };
+}
 let db;
 function seed() {
   const rnd = (a, b) => Math.round(a + Math.random() * (b - a));
@@ -26,17 +40,25 @@ function seed() {
   for (let i = 0; i < 110; i++) {
     const status = stOrd[rnd(0, 5)];
     const valor = rnd(300, 2800), data = daysAgo(rnd(0, 175));
-    orders.push({ id: i + 1, cliente: rnd(1, 6), descricao: svc[rnd(0, 4)], valor, data, status });
-    if (status === "Concluído") transactions.push({ id: transactions.length + 1, descricao: `OS #${i + 1}`, tipo: "Receita", valor, data });
+    const venc = addDays(data, rnd(7, 30)), pago = status === "Concluído" && (venc < daysAgo(-3) ? Math.random() > .35 : Math.random() > .8);
+    orders.push({ id: i + 1, cliente: rnd(1, 6), descricao: svc[rnd(0, 4)], valor, data, vencimento: venc, pago, status });
+    if (pago) transactions.push({ id: transactions.length + 1, descricao: `OS #${i + 1}`, tipo: "Receita", valor, data });
   }
   ["Combustível", "Salários", "Materiais", "Aluguel", "Ferramentas"].forEach((d, k) => {
     for (let m = 0; m < 6; m++) transactions.push({ id: transactions.length + 1, descricao: d, tipo: "Despesa", valor: rnd(500, 2200) / (k === 1 ? 1 : 2), data: daysAgo(m * 30 + rnd(0, 20)) });
   });
-  return { clients, teams, appointments, orders, transactions, seq: 1000 };
+  [1, 2, 3].forEach(k => appointments.push({ id: 500 + k, cliente: rnd(1, 6), servico: svc[rnd(0, 4)], data: daysAgo(-1), equipe: rnd(1, 2), status: "Agendado" }));
+  return { clients, teams, appointments, orders, transactions, messages: [], settings: defaultSettings(), seq: 1000 };
 }
 function load() {
   try { db = JSON.parse(localStorage.getItem(KEY)); } catch { db = null; }
   if (!db) { db = seed(); save(); }
+  // migração de dados salvos por versões anteriores
+  db.messages ||= []; db.settings ||= defaultSettings();
+  db.settings.templates = { ...defaultSettings().templates, ...db.settings.templates };
+  db.settings = { ...defaultSettings(), ...db.settings };
+  db.orders.forEach(o => { if (o.vencimento == null) o.vencimento = addDays(o.data, 15); if (o.pago == null) o.pago = o.status === "Concluído"; });
+  save();
 }
 function save() { try { localStorage.setItem(KEY, JSON.stringify(db)); } catch { /* armazenamento indisponível */ } }
 const nextId = () => ++db.seq;
@@ -44,8 +66,14 @@ const clientName = id => (db.clients.find(c => c.id == id) || {}).nome || "—";
 const teamName = id => (db.teams.find(t => t.id == id) || {}).nome || "—";
 
 /* ---------- Entidades (CRUD genérico) ---------- */
-const tagClass = s => ({ "Concluído": "ok", "Realizado": "ok", "Receita": "ok", "Em Andamento": "run", "Agendado": "run", "Pendente": "wait", "Recusado": "bad", "Cancelado": "bad", "Despesa": "bad" }[s] || "");
+const tagClass = s => ({ "Concluído": "ok", "Realizado": "ok", "Receita": "ok", "Em Andamento": "run", "Agendado": "run", "Pendente": "wait", "Pago": "ok", "Recusado": "bad", "Cancelado": "bad", "Despesa": "bad" }[s] || "");
 const tag = s => `<span class="tag ${tagClass(s)}">${esc(s)}</span>`;
+const payTag = o => {
+  if (o.pago) return tag("Pago");
+  if (o.status !== "Concluído") return `<span class="tag">—</span>`;
+  const d = diffDays(o.vencimento, today());
+  return d < 0 ? `<span class="tag bad">Vencida há ${-d}d</span>` : `<span class="tag wait">Vence ${d === 0 ? "hoje" : "em " + d + "d"}</span>`;
+};
 const clientOpts = () => db.clients.map(c => [c.id, c.nome]);
 const teamOpts = () => db.teams.map(t => [t.id, t.nome]);
 
@@ -54,8 +82,8 @@ const ENTITIES = {
     fields: [{ k: "cliente", l: "Cliente", t: "select", o: clientOpts, num: 1 }, { k: "servico", l: "Serviço" }, { k: "data", l: "Data", t: "date" }, { k: "equipe", l: "Equipe", t: "select", o: teamOpts, num: 1 }, { k: "status", l: "Status", t: "select", o: () => ["Agendado", "Realizado", "Cancelado"].map(s => [s, s]) }],
     cols: [["Data", r => fmtDate(r.data)], ["Cliente", r => esc(clientName(r.cliente))], ["Serviço", r => esc(r.servico)], ["Equipe", r => esc(teamName(r.equipe))], ["Status", r => tag(r.status)]], sort: r => r.data, desc: true },
   ordens: { store: "orders", title: "Ordens de Serviço", sub: "Acompanhe cada serviço e orçamento", novo: "Nova ordem",
-    fields: [{ k: "cliente", l: "Cliente", t: "select", o: clientOpts, num: 1 }, { k: "descricao", l: "Descrição" }, { k: "valor", l: "Valor (R$)", t: "number" }, { k: "data", l: "Data", t: "date" }, { k: "status", l: "Status", t: "select", o: () => ["Pendente", "Em Andamento", "Concluído", "Recusado"].map(s => [s, s]) }],
-    cols: [["Nº", r => "#" + r.id], ["Data", r => fmtDate(r.data)], ["Cliente", r => esc(clientName(r.cliente))], ["Descrição", r => esc(r.descricao)], ["Valor", r => brl(r.valor)], ["Status", r => tag(r.status)]], sort: r => r.data, desc: true },
+    fields: [{ k: "cliente", l: "Cliente", t: "select", o: clientOpts, num: 1 }, { k: "descricao", l: "Descrição" }, { k: "valor", l: "Valor (R$)", t: "number" }, { k: "data", l: "Data", t: "date" }, { k: "vencimento", l: "Vencimento", t: "date" }, { k: "status", l: "Status", t: "select", o: () => ["Pendente", "Em Andamento", "Concluído", "Recusado"].map(s => [s, s]) }, { k: "pago", l: "Pagamento", t: "select", bool: 1, o: () => [["false", "Em aberto"], ["true", "Pago"]] }],
+    cols: [["Nº", r => "#" + r.id], ["Data", r => fmtDate(r.data)], ["Cliente", r => esc(clientName(r.cliente))], ["Descrição", r => esc(r.descricao)], ["Valor", r => brl(r.valor)], ["Status", r => tag(r.status)], ["Pagamento", r => payTag(r)]], extra: r => r.status === "Concluído" && !r.pago ? `<button data-pay="${r.id}">Receber</button>` : "", sort: r => r.data, desc: true },
   clientes: { store: "clients", title: "Clientes", sub: "Sua base de clientes", novo: "Novo cliente",
     fields: [{ k: "nome", l: "Nome" }, { k: "telefone", l: "Telefone" }, { k: "email", l: "E-mail", t: "email" }],
     cols: [["Nome", r => esc(r.nome)], ["Telefone", r => esc(r.telefone)], ["E-mail", r => esc(r.email)]], sort: r => r.nome },
@@ -142,6 +170,7 @@ function dashboard() {
     <div class="card kpi"><div class="ic">✅</div><b>${c.rea}</b><span>Serviços Realizados</span>${delta(c.rea, p.rea)}</div>
     <div class="card kpi"><div class="ic">💲</div><b>${brl(c.fat)}</b><span>Faturamento</span>${delta(c.fat, p.fat)}</div>
     <div class="card kpi"><div class="ic">📈</div><b>${c.aceite}%</b><span>Taxa de Aceite</span>${delta(c.aceite, p.aceite)}</div>
+    <a class="card kpi" href="#whatsapp" style="text-decoration:none;color:inherit"><div class="ic">⏰</div><b class="down">${brl(overdue().total)}</b><span>Em atraso (${overdue().n} OS)</span><em class="up">Cobrar no WhatsApp →</em></a>
   </section>
   <section class="grid charts">
     <div class="card"><h3>Evolução Financeira <span class="legend"><span><i class="dot" style="background:#2563EB"></i>Receitas</span><span><i class="dot" style="background:#10B981"></i>Despesas</span></span></h3>${lineChart(monthlyTotals(6))}</div>
@@ -157,7 +186,7 @@ function crud(name) {
     const r = sum(db.transactions.filter(t => t.tipo === "Receita")), d = sum(db.transactions.filter(t => t.tipo === "Despesa"));
     summary = `<section class="grid kpis"><div class="card kpi"><span>Receitas</span><b class="up">${brl(r)}</b></div><div class="card kpi"><span>Despesas</span><b class="down">${brl(d)}</b></div><div class="card kpi"><span>Lucro</span><b>${brl(r - d)}</b></div></section>`;
   }
-  const body = rows.length ? rows.map(r => `<tr>${e.cols.map(c => `<td>${c[1](r)}</td>`).join("")}<td class="row-actions"><button data-edit="${r.id}">Editar</button><button class="del" data-del="${r.id}">Excluir</button></td></tr>`).join("") : `<tr><td class="empty" colspan="${e.cols.length + 1}">Nenhum registro ainda.</td></tr>`;
+  const body = rows.length ? rows.map(r => `<tr>${e.cols.map(c => `<td>${c[1](r)}</td>`).join("")}<td class="row-actions">${e.extra ? e.extra(r) : ""}<button data-edit="${r.id}">Editar</button><button class="del" data-del="${r.id}">Excluir</button></td></tr>`).join("") : `<tr><td class="empty" colspan="${e.cols.length + 1}">Nenhum registro ainda.</td></tr>`;
   return `<header class="top"><div><h1>${e.title}</h1><p>${e.sub}</p></div><button class="btn" data-new>${e.novo}</button></header>${summary}
   <div class="card table-wrap"><table><thead><tr>${e.cols.map(c => `<th>${c[0]}</th>`).join("")}<th></th></tr></thead><tbody>${body}</tbody></table></div>`;
 }
@@ -173,18 +202,106 @@ function relatorios() {
 }
 
 function configuracoes() {
-  return `<header class="top"><div><h1>Configurações</h1><p>Dados do aplicativo</p></div></header>
-  <div class="card" style="max-width:520px;display:grid;gap:12px"><p>Os dados ficam salvos neste navegador. Você pode exportar um backup ou restaurar os dados de exemplo.</p>
+  const c = db.settings, t = c.templates;
+  const num = (k, l) => `<label>${l}<input type="number" min="0" name="${k}" value="${c[k]}"></label>`;
+  const ta = (k, l) => `<label>${l}<textarea name="t_${k}" rows="3">${esc(t[k])}</textarea></label>`;
+  return `<header class="top"><div><h1>Configurações</h1><p>Regras de cobrança, lembretes e dados do aplicativo</p></div></header>
+  <form id="cfg" class="card cfg"><h3>Regras automáticas (WhatsApp)</h3>
+    <label>Nome da empresa<input name="empresa" value="${esc(c.empresa)}"></label>
+    <label>Chave PIX (opcional, incluída nas cobranças)<input name="pix" value="${esc(c.pix)}" placeholder="CNPJ, e-mail, telefone ou chave aleatória"></label>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+      ${num("lembreteDias", "Lembrar agendamento com até X dias de antecedência")}${num("cobrancaAntes", "Avisar vencimento com até X dias de antecedência")}
+      ${num("cobrancaApos", "Cobrar após X dias de atraso")}${num("reenvioDias", "Reenviar cobrança a cada X dias")}</div>
+    <h3>Modelos de mensagem</h3><p class="hint">Variáveis: {cliente} {servico} {data} {os} {valor} {vencimento} {pix} {empresa}</p>
+    ${ta("lembrete", "Lembrete de agendamento")}${ta("cobrancaAviso", "Aviso de vencimento")}${ta("cobrancaVencida", "Cobrança de fatura vencida")}${ta("agradecimento", "Agradecimento por pagamento")}
+    <div><button class="btn">Salvar regras</button></div></form>
+  <div class="card" style="max-width:520px;display:grid;gap:12px;margin-top:16px"><p>Os dados ficam salvos neste navegador. Você pode exportar um backup ou restaurar os dados de exemplo.</p>
   <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="backup">Exportar backup (JSON)</button><button class="btn ghost" id="reset">Restaurar dados de exemplo</button></div></div>`;
 }
 
+/* ---------- WhatsApp: regras, fila e chat ---------- */
+const TIPOS = { lembrete: "Lembrete", cobrancaAviso: "Vencimento", cobrancaVencida: "Cobrança", agradecimento: "Agradecimento", manual: "Manual" };
+const phoneOf = c => { const d = String((c || {}).telefone || "").replace(/\D/g, ""); return d.length > 11 ? d : d ? "55" + d : ""; };
+const waLink = (c, txt) => `https://wa.me/${phoneOf(c)}?text=${encodeURIComponent(txt)}`;
+function fill(tpl, vars) {
+  const out = tpl.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? vars[k] : m));
+  return out.replace(/ {2,}/g, " ").trim();
+}
+function overdue() {
+  const l = db.orders.filter(o => o.status === "Concluído" && !o.pago && o.vencimento < today());
+  return { n: l.length, total: sum(l) };
+}
+function orderVars(o) {
+  const s = db.settings;
+  return { cliente: clientName(o.cliente), servico: o.descricao, os: o.id, valor: brl(o.valor), vencimento: fmtDate(o.vencimento), data: fmtDate(o.data), empresa: s.empresa, pix: s.pix ? `Chave PIX: ${s.pix}. ` : "" };
+}
+const lastSent = (ref, tipo) => db.messages.filter(m => m.ref === ref && m.tipo === tipo).map(m => m.em.slice(0, 10)).sort().pop();
+function suggestions() {
+  const s = db.settings, t = today(), out = [];
+  db.appointments.filter(a => a.status === "Agendado").forEach(a => {
+    const d = diffDays(a.data, t), ref = "A" + a.id;
+    if (d >= 0 && d <= s.lembreteDias && !lastSent(ref, "lembrete"))
+      out.push({ ref, tipo: "lembrete", cliente: a.cliente, txt: fill(s.templates.lembrete, { cliente: clientName(a.cliente), servico: a.servico, data: d === 0 ? "hoje" : d === 1 ? "amanhã (" + fmtDate(a.data) + ")" : fmtDate(a.data), empresa: s.empresa }) });
+  });
+  db.orders.filter(o => o.status === "Concluído" && !o.pago).forEach(o => {
+    const d = diffDays(o.vencimento, t), ref = "O" + o.id;
+    let tipo = null;
+    if (d < 0 && -d >= s.cobrancaApos) tipo = "cobrancaVencida"; else if (d >= 0 && d <= s.cobrancaAntes) tipo = "cobrancaAviso";
+    if (!tipo) return;
+    const last = lastSent(ref, tipo);
+    if (last && (tipo === "cobrancaAviso" || diffDays(t, last) < s.reenvioDias)) return;
+    out.push({ ref, tipo, cliente: o.cliente, txt: fill(s.templates[tipo], orderVars(o)) });
+  });
+  return out.filter(x => phoneOf(db.clients.find(c => c.id == x.cliente)));
+}
+function logSend(cliente, tipo, ref, txt) {
+  db.messages.push({ id: nextId(), cliente: +cliente, tipo, ref, txt, em: new Date().toISOString() });
+  save();
+  window.open(waLink(db.clients.find(c => c.id == cliente), txt), "_blank", "noopener");
+}
+let chatClient = null, showAll = false;
+function whatsapp() {
+  const sug = suggestions();
+  if (!chatClient || !db.clients.some(c => c.id == chatClient)) chatClient = (db.clients[0] || {}).id;
+  const lastMsg = id => db.messages.filter(m => m.cliente == id).sort((a, b) => a.em < b.em ? 1 : -1)[0];
+  const list = [...db.clients].sort((a, b) => ((lastMsg(b.id) || {}).em || "").localeCompare((lastMsg(a.id) || {}).em || "")).map(c => {
+    const m = lastMsg(c.id);
+    return `<button class="conv ${c.id == chatClient ? "on" : ""}" data-chat="${c.id}"><b>${esc(c.nome)}</b><small>${m ? esc(m.txt.slice(0, 44)) + "…" : "Sem mensagens"}</small></button>`;
+  }).join("");
+  const cl = db.clients.find(c => c.id == chatClient) || {};
+  const thread = db.messages.filter(m => m.cliente == chatClient).sort((a, b) => a.em > b.em ? 1 : -1)
+    .map(m => `<div class="bubble"><small>${esc(TIPOS[m.tipo] || m.tipo)}</small>${esc(m.txt)}<time>${new Date(m.em).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })} ✓</time></div>`).join("") || `<p class="empty">Nenhuma mensagem enviada a este cliente ainda.</p>`;
+  const quick = ["lembrete", "cobrancaAviso", "cobrancaVencida", "agradecimento"].map(k => `<button type="button" class="chip" data-tpl="${k}">${TIPOS[k]}</button>`).join("");
+  const shown = showAll ? sug : sug.slice(0, 6);
+  const queue = sug.length ? shown.map((x, i) => `<div class="sug"><div><span class="tag ${x.tipo === "cobrancaVencida" ? "bad" : x.tipo === "lembrete" ? "run" : "wait"}">${TIPOS[x.tipo]}</span> <b>${esc(clientName(x.cliente))}</b><p>${esc(x.txt)}</p></div><button class="btn" data-send="${i}">Enviar</button></div>`).join("") + (sug.length > 6 ? `<p style="margin-top:10px"><button class="btn ghost" id="more">${showAll ? "Mostrar menos" : `Ver todas (${sug.length})`}</button></p>` : "") : `<p class="empty">Nada pendente. 🎉 Nenhum lembrete ou cobrança a enviar pelas regras atuais.</p>`;
+  window.__sug = sug;
+  return `<header class="top"><div><h1>WhatsApp</h1><p>Lembretes e cobranças com um clique</p></div><a class="btn ghost" href="#configuracoes" style="text-decoration:none">Editar regras</a></header>
+  <div class="card"><h3>Fila das regras <span class="tag wait">${sug.length} pendente(s)</span></h3>${queue}
+    <p class="hint">O botão abre o WhatsApp com a mensagem pronta; você confirma o envio lá. Respostas dos clientes aparecem no próprio WhatsApp.</p></div>
+  <div class="card chat" style="margin-top:16px"><aside>${list}</aside>
+    <section><div class="chat-head"><b>${esc(cl.nome || "")}</b><small>${esc(cl.telefone || "sem telefone")}</small></div>
+      <div class="thread">${thread}</div>
+      <form id="composer"><div class="chips">${quick}</div><div class="row"><textarea id="msg" rows="2" placeholder="Escreva uma mensagem…" required></textarea><button class="btn wa">Enviar no WhatsApp</button></div></form></section></div>`;
+}
+function whatsappVarsFor(tipo) {
+  const c = db.clients.find(x => x.id == chatClient), s = db.settings;
+  const o = db.orders.filter(x => x.cliente == chatClient && x.status === "Concluído").sort((a, b) => (a.pago - b.pago) || (a.vencimento > b.vencimento ? 1 : -1))[0];
+  const a = db.appointments.filter(x => x.cliente == chatClient && x.status === "Agendado").sort((x, y) => x.data > y.data ? 1 : -1)[0];
+  return fill(s.templates[tipo], { ...(o ? orderVars(o) : { valor: "R$ 0,00", vencimento: "", os: "", pix: s.pix ? `Chave PIX: ${s.pix}. ` : "" }), cliente: c.nome, empresa: s.empresa, servico: a ? a.servico : (o ? o.descricao : ""), data: a ? fmtDate(a.data) : "" });
+}
+function settle(o) {
+  if (o.pago && o.status === "Concluído" && !db.transactions.some(t => t.descricao === `OS #${o.id}`))
+    db.transactions.push({ id: nextId(), descricao: `OS #${o.id}`, tipo: "Receita", valor: o.valor, data: today() });
+}
+
 /* ---------- Roteamento ---------- */
-const ROUTES = [["dashboard", "Dashboard", "🏠"], ["agendamentos", "Agendamentos", "📅"], ["ordens", "Ordens de Serviço", "📋"], ["clientes", "Clientes", "👤"], ["equipes", "Equipes", "👥"], ["financeiro", "Financeiro", "📊"], ["relatorios", "Relatórios", "📄"], ["configuracoes", "Configurações", "⚙️"]];
+const ROUTES = [["dashboard", "Dashboard", "🏠"], ["agendamentos", "Agendamentos", "📅"], ["ordens", "Ordens de Serviço", "📋"], ["clientes", "Clientes", "👤"], ["equipes", "Equipes", "👥"], ["financeiro", "Financeiro", "📊"], ["whatsapp", "WhatsApp", "💬"], ["relatorios", "Relatórios", "📄"], ["configuracoes", "Configurações", "⚙️"]];
 function render() {
   const r = (location.hash.slice(1) || "dashboard");
   const route = ROUTES.some(x => x[0] === r) ? r : "dashboard";
-  $("#nav").innerHTML = ROUTES.map(([k, l, i]) => `<a href="#${k}" class="${k === route ? "active" : ""}"><span>${i}</span>${l}</a>`).join("");
-  $("#app").innerHTML = route === "dashboard" ? dashboard() : route === "relatorios" ? relatorios() : route === "configuracoes" ? configuracoes() : crud(route);
+  const pend = suggestions().length;
+  $("#nav").innerHTML = ROUTES.map(([k, l, i]) => `<a href="#${k}" class="${k === route ? "active" : ""}"><span>${i}</span>${l}${k === "whatsapp" && pend ? `<em class="badge">${pend}</em>` : ""}</a>`).join("");
+  $("#app").innerHTML = route === "dashboard" ? dashboard() : route === "relatorios" ? relatorios() : route === "configuracoes" ? configuracoes() : route === "whatsapp" ? whatsapp() : crud(route);
   $("#sidebar").classList.remove("open");
   bind(route);
 }
@@ -208,7 +325,24 @@ function bind(route) {
     const lines = ["data;descricao;tipo;valor", ...db.transactions.map(t => [t.data, `"${String(t.descricao).replace(/"/g, '""')}"`, t.tipo, String(t.valor).replace(".", ",")].join(";"))];
     download("financeiro.csv", "﻿" + lines.join("\n"), "text/csv");
   };
+  if (route === "whatsapp") {
+    const more = $("#more"); if (more) more.onclick = () => { showAll = !showAll; render(); };
+    app.querySelectorAll("[data-chat]").forEach(b => b.onclick = () => { chatClient = +b.dataset.chat; render(); });
+    app.querySelectorAll("[data-send]").forEach(b => b.onclick = () => { const x = window.__sug[+b.dataset.send]; logSend(x.cliente, x.tipo, x.ref, x.txt); render(); });
+    app.querySelectorAll("[data-tpl]").forEach(b => b.onclick = () => { $("#msg").value = whatsappVarsFor(b.dataset.tpl); $("#msg").focus(); });
+    $("#composer").onsubmit = ev => { ev.preventDefault(); const t = $("#msg").value.trim(); if (t) { logSend(chatClient, "manual", "M", t); render(); } };
+  }
+  if (route === "ordens") app.querySelectorAll("[data-pay]").forEach(b => b.onclick = () => {
+    const o = db.orders.find(x => x.id === +b.dataset.pay); o.pago = true; settle(o); save(); render();
+    if (confirm("Pagamento registrado! Enviar agradecimento por WhatsApp?")) logSend(o.cliente, "agradecimento", "O" + o.id, fill(db.settings.templates.agradecimento, orderVars(o)));
+  });
   if (route === "configuracoes") {
+    $("#cfg").onsubmit = ev => {
+      ev.preventDefault(); const f = Object.fromEntries(new FormData(ev.target)), c = db.settings;
+      c.empresa = f.empresa; c.pix = f.pix; ["lembreteDias", "cobrancaAntes", "cobrancaApos", "reenvioDias"].forEach(k => (c[k] = Math.max(0, Number(f[k]) || 0)));
+      Object.keys(c.templates).forEach(k => (c.templates[k] = f["t_" + k]));
+      save(); alert("Regras salvas."); render();
+    };
     $("#backup").onclick = () => download("gestaolucros-backup.json", JSON.stringify(db, null, 2), "application/json");
     $("#reset").onclick = () => { if (confirm("Substituir todos os dados pelos dados de exemplo?")) { db = seed(); save(); render(); } };
   }
@@ -231,8 +365,10 @@ function openForm(route, id) {
   form.onsubmit = ev => {
     ev.preventDefault();
     const data = Object.fromEntries(new FormData(form));
-    e.fields.forEach(f => { if (f.num || f.t === "number") data[f.k] = Number(data[f.k]); });
-    if (id) Object.assign(rec, data); else db[e.store].push({ id: nextId(), ...data });
+    e.fields.forEach(f => { if (f.num || f.t === "number") data[f.k] = Number(data[f.k]); if (f.bool) data[f.k] = data[f.k] === "true"; });
+    let saved = rec;
+    if (id) Object.assign(rec, data); else { saved = { id: nextId(), ...data }; db[e.store].push(saved); }
+    if (route === "ordens") settle(saved);
     save(); $("#modal").hidden = true; render();
   };
 }

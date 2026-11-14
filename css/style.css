@@ -51,3 +51,23 @@ td{padding:12px;border-bottom:1px solid var(--line)}
   .sidebar{position:fixed;left:-260px;z-index:45;transition:left .2s}.sidebar.open{left:0}
   main{padding:64px 16px 24px}.charts{grid-template-columns:1fr}
 }
+textarea{font:inherit;border:1px solid var(--line);border-radius:8px;padding:9px 12px;width:100%;font-size:14px;resize:vertical}
+.badge{background:var(--green);color:#fff;font-style:normal;font-size:11px;font-weight:700;border-radius:99px;padding:1px 8px;margin-left:auto}
+.hint{color:var(--muted);font-size:12px;margin-top:10px}
+.cfg{display:grid;gap:12px;max-width:760px}.cfg label{display:grid;gap:4px;font-size:12px;font-weight:600;color:var(--muted)}.cfg h3{margin:6px 0 0}
+.sug{display:flex;justify-content:space-between;gap:14px;align-items:center;padding:12px 0;border-bottom:1px solid var(--line)}
+.sug p{font-size:13px;color:var(--muted);margin-top:4px;max-width:70ch}
+.chat{display:grid;grid-template-columns:260px 1fr;padding:0;overflow:hidden;min-height:420px}
+.chat aside{border-right:1px solid var(--line);overflow:auto;max-height:520px}
+.conv{display:block;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid var(--line);padding:12px 14px;cursor:pointer}
+.conv small{display:block;color:var(--muted);font-size:12px;margin-top:2px}.conv.on,.conv:hover{background:#EFF6FF}
+.chat section{display:flex;flex-direction:column;min-width:0}
+.chat-head{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;flex-direction:column}.chat-head small{color:var(--muted)}
+.thread{flex:1;padding:16px;display:flex;flex-direction:column;gap:8px;background:#ECFDF5;overflow:auto;max-height:340px;min-height:200px}
+.bubble{align-self:flex-end;background:#D1FAE5;border-radius:12px 12px 2px 12px;padding:8px 12px;max-width:80%;font-size:14px;white-space:pre-wrap}
+.bubble small{display:block;color:#047857;font-weight:700;font-size:11px}.bubble time{display:block;text-align:right;color:var(--muted);font-size:11px;margin-top:2px}
+#composer{padding:12px;border-top:1px solid var(--line);display:grid;gap:8px}
+#composer .row{display:flex;gap:8px;align-items:flex-end}.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{background:#fff;border:1px solid var(--line);border-radius:99px;padding:4px 12px;font-size:12px;cursor:pointer;font-weight:600}.chip:hover{border-color:var(--blue);color:var(--blue)}
+.btn.wa{background:#25D366}
+@media(max-width:860px){.chat{grid-template-columns:1fr}.chat aside{max-height:150px;border-right:0;border-bottom:1px solid var(--line)}.sug{flex-direction:column;align-items:stretch}}
